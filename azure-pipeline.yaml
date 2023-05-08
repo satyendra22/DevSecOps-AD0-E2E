@@ -1,0 +1,103 @@
+trigger:
+- master
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+- group: "SECURE_TOKENS"
+- name: snyk_token
+  value: $[variables.SNYKTOKEN]
+- name: sonar_token
+  value: $[variables.SONARTOKEN]
+- name: semgrep_token
+  value: $[variables.SEMGREP_APP_TOKEN]
+steps:
+- script: |
+    python -m pip install --upgrade pip
+    pip install semgrep
+    semgrep ci
+
+- script: |
+    mvn verify package sonar:sonar -Dsonar.host.url=https://sonarcloud.io/ -Dsonar.organization=devsecopss -Dsonar.projectKey=devsecopssprojectkey -Dsonar.login=$(sonar_token)
+  displayName: "Integrate SAST using SonarCloud to populate code coverage and secure pipeline variable in Azure DevOps DevSecOps Pipeline"
+
+- script: |
+    SNYK_TOKEN=$(snyk_token)
+    export SNYK_TOKEN
+    mvn snyk:test -fn 
+  displayName: "Integrate SCA scan using Snyk in ADO DevSecOps Pipeline"
+
+- task: dependency-check-build-task@6
+  inputs:
+    projectName: 'Dep_Check'
+    scanPath: '$(Build.SourcesDirectory)/'
+    format: 'HTML'
+  displayName: "Integrate SCA scan using Dependency Check in ADO DevSecOps Pipeline"  
+  
+# Build Docker image
+- task: Bash@3
+  displayName: Build and run Docker
+  inputs:
+      targetType: inline
+      script: |
+        sudo docker build -t mvn . && \
+        sudo docker run -it -d mvn
+        docker-compose up -d
+
+- task: CmdLine@2
+  displayName: Download and install Trivy
+  inputs:
+    script: |
+      sudo apt-get install rpm
+      wget https://github.com/aquasecurity/trivy/releases/download/v0.38.3/trivy_0.38.3_Linux-64bit.deb
+      sudo dpkg -i trivy_0.38.3_Linux-64bit.deb
+      trivy -v  
+- task: CmdLine@2
+  displayName: "Integrate Conatiner scan using Trivy in ADO DevSecOps Pipeline"
+  inputs:
+    script: |
+      trivy image  mvn  >> trivyScan.txt
+      mv trivyScan.txt $(Build.ArtifactStagingDirectory)  
+
+- script: |
+      wget https://github.com/zaproxy/zaproxy/releases/download/v2.11.1/ZAP_2.11.1_Linux.tar.gz
+      tar -xvf ZAP_2.11.1_Linux.tar.gz
+      cd ZAP_2.11.1
+      ./zap.sh -cmd -quickurl http://localhost:1337 -quickprogress -quickout /home/vsts/work/1/a/zap_report.html 
+  displayName: "Integrate DAST using OWASP ZAP in ADO DevSecOps Pipeline"
+
+- task: CmdLine@2
+  inputs:
+    script: |
+      sudo apt-get install npm
+      sudo npm install -g @cyclonedx/cdxgen
+      cdxgen -t java -o bom.json -p
+      cat bom.json
+      mv bom.json $(Build.ArtifactStagingDirectory)
+  displayName: "Generate SBOM using cdxgen in ADO DevSecOps Pipeline"
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    pathToPublish: '$(Build.ArtifactStagingDirectory)'
+    artifactName : Reports
+  displayName: "Publishing reports via ADO DevSecOps Pipeline"
+  
+- script: |
+    curl -fsSL https://raw.githubusercontent.com/ZupIT/horusec/main/deployments/scripts/install.sh | bash -s latest
+    horusec start -p ./ >> HorusecReport.txt
+    mv HorusecReport.txt $(Build.ArtifactStagingDirectory)
+  displayName: "Find vulnerability using Horusec in ADO DevSecOps Pipeline"
+
+- task: Bash@3
+  displayName: Stop docker 
+  inputs:
+      targetType: inline
+      script: |
+        docker-compose stop
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    pathToPublish: '$(Build.ArtifactStagingDirectory)'
+    artifactName : Reports
+  displayName: "Publishing reports via ADO DevSecOps Pipeline"
